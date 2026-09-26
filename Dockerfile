@@ -10,15 +10,12 @@ ENV UV_COMPILE_BYTECODE=1
 # Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
 
-# Copy project files
-COPY pyproject.toml .
+# Copy all project files first so README and sources are available during build
+COPY . .
 
 # Install the project's dependencies using uv
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -e .
-
-# Copy the rest of the application code
-COPY . .
 
 # Second stage: runtime image
 FROM python:3.14-slim
