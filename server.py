@@ -546,11 +546,15 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
         return f"Error: getting recommendations for {ticker}: {e}"
 
 
-def main() -> None:
-    # Initialize and run the server
-    print("Starting Yahoo Finance MCP server...")
-    yfinance_server.run(transport="stdio")
+import os
 
+def main() -> None:
+    # Initialize and run the server on a web port
+    print("Starting Yahoo Finance MCP server on the web...")
+    # سحب المنفذ الشبكي الذي تخصصه منصة Render
+    port = int(os.environ.get("PORT", 8080))
+    # التشغيل في وضع الويب (sse) ليتصل بتطبيق كلود
+    yfinance_server.run(transport="sse", host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
