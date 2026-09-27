@@ -1014,10 +1014,6 @@ async def _send_json(send, status: int, payload: Any, head: bool = False, header
     await send({"type": "http.response.body", "body": b"" if head else body})
 
 
-def _has_header(scope, name: bytes) -> bool:
-    return any(k.lower() == name for k, _ in scope.get("headers") or [])
-
-
 def build_web_app():
     """ASGI app serving legacy SSE, Streamable HTTP (stateless) and /health."""
     from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
@@ -1075,19 +1071,12 @@ def build_web_app():
         if path in ("/mcp", "/mcp/"):
             await streamable(scope, receive, send)
             return
-        if path in ("/sse", "/sse/") and STREAMABLE_ON_SSE_PATH:
-            if method in ("POST", "DELETE"):
-                # Clients that try Streamable HTTP first (claude.ai does) are
-                # served directly instead of falling back to legacy SSE.
-                await streamable(scope, receive, send)
-                return
-            if method == "GET" and (
-                _has_header(scope, b"mcp-protocol-version") or _has_header(scope, b"mcp-session-id")
-            ):
-                # A Streamable HTTP client asking for a standalone stream:
-                # stateless mode has none, which the spec signals with 405.
-                await _send_json(send, 405, {"error": "no standalone stream"}, headers=[(b"allow", b"POST")])
-                return
+        if path in ("/sse", "/sse/") and STREAMABLE_ON_SSE_PATH and method in ("POST", "DELETE"):
+            # Clients that try Streamable HTTP first are served directly instead
+            # of falling back to legacy SSE. GET always opens the legacy SSE
+            # stream: claude.ai's SSE client sends MCP headers on that GET too.
+            await streamable(scope, receive, send)
+            return
         await sse_app(scope, receive, send)
 
     return app
