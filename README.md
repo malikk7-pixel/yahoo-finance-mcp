@@ -180,6 +180,52 @@ To integrate this server with Claude for Desktop:
 
 4. Restart Claude for Desktop
 
+## Hosting on Render (remote connector)
+
+The `Dockerfile` runs the server over HTTP (Render sets `PORT`). Endpoints:
+
+| Path | Purpose |
+|------|---------|
+| `GET /sse` + `POST /messages/` | Legacy SSE transport |
+| `POST /mcp` | Streamable HTTP (stateless, JSON responses) |
+| `POST /sse` | Streamable HTTP on the legacy URL, so existing connector URLs keep working |
+| `GET /health` | Status: uptime, keep-alive, and the state of each Yahoo endpoint |
+
+### Resilience
+
+Yahoo throttles some endpoints per IP. From shared cloud IPs the `quoteSummary`
+endpoint behind `Ticker.info` and the news endpoint often answer
+"Too Many Requests", while the chart endpoint keeps working. The server
+therefore:
+
+- builds the live quote in `get_stock_info` (price, change, pre/post-market,
+  day range, volume, average volume, 52-week range, market state, last split)
+  from the chart endpoint, and merges `quoteSummary` fundamentals (float, short
+  interest, ownership, ratios) when available, cached for 6 hours. The
+  `dataStatus` field reports the age of each part;
+- falls back from yfinance news to Yahoo's RSS feed and search API, and from
+  yfinance history to the chart API;
+- runs every Yahoo call in a worker pool with a time budget, shares concurrent
+  identical requests, caches results and serves the last good result when Yahoo
+  fails;
+- backs off automatically (circuit breakers) when an endpoint answers 429.
+
+### Environment variables (all optional)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `KEEPALIVE` | `always` | Self-ping so Render's free plan does not sleep: `always`, `market` (weekdays 03:30-20:30 New York), or `off` |
+| `KEEPALIVE_INTERVAL` | `600` | Seconds between pings (keep below 900) |
+| `KEEPALIVE_URL` | `RENDER_EXTERNAL_URL` | Public URL to ping |
+| `STREAMABLE_ON_SSE_PATH` | `1` | Serve Streamable HTTP on `POST /sse`; set `0` for legacy SSE only |
+| `YF_MAX_WORKERS` | `8` | Worker threads for Yahoo calls |
+| `YF_UPSTREAM_CONCURRENCY` | `4` | Simultaneous requests to Yahoo |
+| `YF_HTTP_TIMEOUT` | `8` | Seconds per Yahoo HTTP request |
+
+A free Render workspace has 750 instance hours a month: one service kept awake
+around the clock uses about 744. If you run other free services in the same
+workspace, set `KEEPALIVE=market`.
+
 ## License
 
 MIT
