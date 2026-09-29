@@ -49,7 +49,7 @@ def clean(monkeypatch):
     yd.CACHE._data.clear()
     for b in yd.BREAKERS.values():
         b.success()
-    sharia._robots.update(parser=None, allow_all=None, at=0.0)
+    sharia._robots.update(parser=None, allow_all=None, unreachable=None, at=0.0)
     monkeypatch.setattr(sharia, "MIN_INTERVAL", 0)
     yield
     yd.CACHE._data.clear()
@@ -147,3 +147,34 @@ def test_fetch_yaqeen_tries_dotted_class_share(monkeypatch):
     out = sharia.fetch_yaqeen("BRK-B")
     assert out["available"] is True and out["url"] == "https://yaaqen.com/stocks/BRK.B"
     assert seen[-2:] == ["https://yaaqen.com/stocks/BRK-B", "https://yaaqen.com/stocks/BRK.B"]
+
+
+def test_startup_self_check_records_result(monkeypatch):
+    async def no_sleep(_):
+        return None
+
+    async def fake_status(ticker):
+        return json.dumps({"verdict": "محل نظر", "sources": [yaqeen_result("محل نظر")]}, ensure_ascii=False)
+
+    monkeypatch.setattr(server.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(server, "get_sharia_status", fake_status)
+    server.SHARIA_CHECK_STATE.clear()
+    asyncio.run(server._sharia_self_check())
+    state = server.SHARIA_CHECK_STATE
+    assert state["verdict"] == "محل نظر" and state["yaqeenAvailable"] is True
+    assert state["yaqeenUpdated"] == "2026-09-20"
+
+
+def test_unreachable_site_is_a_temporary_failure_not_a_verdict(monkeypatch):
+    def refused(url, timeout=10.0):
+        raise yd.UpstreamError("ConnectionError: refused")
+
+    monkeypatch.setattr(sharia, "_get", refused)
+    with pytest.raises(yd.UpstreamError):
+        sharia.fetch_yaqeen("AAPL")
+    monkeypatch.setattr(server, "_fetch_info", lambda s: (_ for _ in ()).throw(yd.RateLimited()))
+    monkeypatch.setattr(server.yf, "Ticker", FakeTicker)
+    out = json.loads(asyncio.run(server.get_sharia_status("AAPL")))
+    assert out["verdict"] == "غير متاح"
+    assert "تعذّر الوصول" in out["sources"][0]["reason"]
+    assert yd.CACHE.get("sharia|yaqeen|AAPL") is None  # nothing cached as a verdict

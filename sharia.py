@@ -43,7 +43,7 @@ LABELS = {
 
 _lock = threading.Lock()
 _last_request = 0.0
-_robots: dict[str, Any] = {"parser": None, "at": 0.0, "allow_all": None}
+_robots: dict[str, Any] = {"parser": None, "at": 0.0, "allow_all": None, "unreachable": None}
 
 
 def _get(url: str, timeout: float = 10.0) -> requests.Response:
@@ -66,22 +66,29 @@ def _get(url: str, timeout: float = 10.0) -> requests.Response:
 
 
 def robots_allows(url: str) -> bool:
-    """RFC 9309: 4xx robots.txt means allow; 5xx or unreachable means disallow."""
+    """RFC 9309: a 4xx robots.txt means allow; a 5xx or unreachable one means
+    "do not crawl for now". That second case is a temporary failure, not a
+    rule, so it raises UpstreamError: the caller then backs off, serves its last
+    good result, and caches nothing."""
     now = time.time()
     if now - _robots["at"] > ROBOTS_TTL:
-        parser, allow_all = None, None
+        parser, allow_all, unreachable = None, None, None
         try:
             resp = _get(YAQEEN_BASE + "/robots.txt")
             if resp.status_code == 200:
                 parser = urllib.robotparser.RobotFileParser()
                 parser.parse(resp.text.splitlines())
+            elif 400 <= resp.status_code < 500:
+                allow_all = True
             else:
-                allow_all = 400 <= resp.status_code < 500
-        except yd.UpstreamError:
-            allow_all = False
+                unreachable = f"HTTP {resp.status_code}"
+        except yd.UpstreamError as exc:
+            unreachable = str(exc)
         # An unreachable robots.txt is retried after 10 minutes, not 24 hours.
-        checked_at = now if allow_all is not False else now - ROBOTS_TTL + 600
-        _robots.update(parser=parser, allow_all=allow_all, at=checked_at)
+        checked_at = now if unreachable is None else now - ROBOTS_TTL + 600
+        _robots.update(parser=parser, allow_all=allow_all, unreachable=unreachable, at=checked_at)
+    if _robots.get("unreachable"):
+        raise yd.UpstreamError(f"تعذّر الوصول إلى موقع يقين ({_robots['unreachable']})")
     if _robots["parser"] is not None:
         return _robots["parser"].can_fetch(USER_AGENT, url)
     return bool(_robots["allow_all"])
