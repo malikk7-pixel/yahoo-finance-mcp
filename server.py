@@ -1095,6 +1095,38 @@ async def _keepalive_loop() -> None:
         await asyncio.sleep(KEEPALIVE_INTERVAL)
 
 
+# One Sharia lookup shortly after start: proves from the live server that the
+# Yaqeen page still parses, and warns early if its layout changes.
+SHARIA_SELF_CHECK = (os.environ.get("SHARIA_SELF_CHECK") or "AAPL").strip().upper()
+SHARIA_CHECK_STATE: dict[str, Any] = {}
+
+
+async def _sharia_self_check() -> None:
+    if not SHARIA_SELF_CHECK or SHARIA_SELF_CHECK in ("0", "OFF", "NO"):
+        return
+    await asyncio.sleep(20)
+    try:
+        out = json.loads(await get_sharia_status(SHARIA_SELF_CHECK))
+        yaqeen = (out.get("sources") or [{}])[0]
+        SHARIA_CHECK_STATE.update(
+            symbol=SHARIA_SELF_CHECK,
+            at=yd.utc_iso(time.time()),
+            verdict=out.get("verdict"),
+            yaqeenAvailable=bool(yaqeen.get("available")),
+            yaqeenUpdated=yaqeen.get("updated"),
+            reason=yaqeen.get("reason"),
+        )
+        if yaqeen.get("available"):
+            log.info("sharia self-check %s: %s (Yaqeen, updated %s)",
+                     SHARIA_SELF_CHECK, out.get("verdict"), yaqeen.get("updated"))
+        else:
+            log.warning("sharia self-check %s: Yaqeen unavailable (%s)",
+                        SHARIA_SELF_CHECK, yaqeen.get("reason"))
+    except Exception as exc:  # never let the check affect the server
+        SHARIA_CHECK_STATE.update(symbol=SHARIA_SELF_CHECK, at=yd.utc_iso(time.time()), error=str(exc)[:200])
+        log.warning("sharia self-check %s failed: %s", SHARIA_SELF_CHECK, exc)
+
+
 def health_payload() -> dict[str, Any]:
     return {
         "status": "ok",
@@ -1108,6 +1140,7 @@ def health_payload() -> dict[str, Any]:
             "streamableHttp": ["POST /mcp"] + (["POST /sse"] if STREAMABLE_ON_SSE_PATH else []),
         },
         "keepalive": {"mode": KEEPALIVE_MODE, "target": bool(KEEPALIVE_URL), **KEEPALIVE_STATE},
+        "shariaSelfCheck": SHARIA_CHECK_STATE,
         "upstream": yd.status_snapshot(),
     }
 
@@ -1146,6 +1179,7 @@ def build_web_app():
             await receive()  # lifespan.startup
             async with session_manager.run():
                 keepalive = asyncio.create_task(_keepalive_loop())
+                self_check = asyncio.create_task(_sharia_self_check())
                 try:
                     await send({"type": "lifespan.startup.complete"})
                     started = True
@@ -1158,6 +1192,7 @@ def build_web_app():
                         pass
                 finally:
                     keepalive.cancel()
+                    self_check.cancel()
         except BaseException as exc:  # noqa: BLE001 - report to the server
             log.exception("lifespan failure")
             kind = "lifespan.shutdown.failed" if started else "lifespan.startup.failed"
