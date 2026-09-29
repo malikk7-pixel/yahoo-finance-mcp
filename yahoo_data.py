@@ -343,6 +343,8 @@ BREAKERS: dict[str, Breaker] = {
     "news": Breaker("news", 300, 3600, threshold=2),
     "fundamentals": Breaker("fundamentals", 120, 1800, threshold=3),
     "options": Breaker("options", 60, 900, threshold=3),
+    # third-party Sharia filter sites
+    "yaqeen": Breaker("yaqeen", 120, 3600, threshold=2),
 }
 
 

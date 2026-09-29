@@ -21,13 +21,13 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY server.py yahoo_data.py ./
+COPY server.py yahoo_data.py sharia.py ./
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     MCP_TRANSPORT=http
 
 # Fail the build if an import is broken; Render then keeps the running version.
-RUN python -c "import curl_cffi, server, yahoo_data; print('import check ok')"
+RUN python -c "import curl_cffi, server, yahoo_data, sharia; print('import check ok')"
 
 EXPOSE 10000
 CMD ["python", "server.py"]
