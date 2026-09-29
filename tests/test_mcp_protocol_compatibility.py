@@ -44,6 +44,7 @@ EXPECTED_TOOL_SCHEMAS = {
         "properties": ["ticker", "recommendation_type", "months_back"],
         "defaults": {"months_back": 12},
     },
+    "get_sharia_status": {"required": ["ticker"], "properties": ["ticker"]},
 }
 
 

@@ -40,6 +40,7 @@ import pandas as pd
 import yfinance as yf
 from mcp.server import MCPServer
 
+import sharia
 import yahoo_data as yd
 
 SERVER_VERSION = "2.0.0"
@@ -177,6 +178,7 @@ Available tools:
 - get_option_expiration_dates: Fetch the available options expiration dates for a given ticker symbol.
 - get_option_chain: Fetch the option chain for a given ticker symbol, expiration date, and option type.
 - get_recommendations: Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
+- get_sharia_status: Get the Sharia compliance classification of a stock (Yaqeen first; Chart Idea link and indicative ratios when Yaqeen says محل نظر).
 
 Data freshness: prices in get_stock_info come live from Yahoo's chart feed.
 Fundamentals (float, short interest, ownership, ratios) can be cached for up
@@ -934,6 +936,119 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
     except Exception as e:
         log.warning(f"Error: getting recommendations for {ticker}: {_describe(e)}")
         return f"Error: getting recommendations for {ticker}: {_describe(e)}"
+
+
+# ==========================================================================
+# get_sharia_status
+# ==========================================================================
+
+SHARIA_FRESH, SHARIA_STALE = HOUR, 7 * DAY
+SHARIA_BUDGET = 20.0
+
+
+async def _sharia_indicators(symbol: str) -> dict[str, Any]:
+    """Indicative ratios against Al-Rajhi decision 485 thresholds (not a ruling)."""
+    out: dict[str, Any] = {}
+    try:
+        res = await yd.cached_call(
+            key=f"info|{symbol}",
+            family="quoteSummary",
+            fn=lambda: _fetch_info(symbol),
+            fresh_ttl=INFO_FRESH,
+            stale_ttl=INFO_STALE,
+            budget=ENRICH_WAIT,
+        )
+        info = res.value if isinstance(res.value, dict) else {}
+    except yd.UpstreamError:
+        info = {}
+    market_cap, debt = yd.num(info.get("marketCap")), yd.num(info.get("totalDebt"))
+    if market_cap and debt is not None:
+        out["debtToMarketCapPct"] = round(debt / market_cap * 100, 2)
+    hint = sharia.activity_hint(info)
+    if hint:
+        out["activityNote"] = hint
+    try:
+        rows = json.loads(await get_financial_statement(symbol, "income_stmt"))
+        latest = rows[0] if isinstance(rows, list) and rows else {}
+    except (ValueError, TypeError):
+        latest = {}
+    revenue = yd.num(latest.get("Total Revenue"))
+    interest = yd.num(latest.get("Interest Income"))
+    if interest is None:
+        interest = yd.num(latest.get("Interest Income Non Operating"))
+    if revenue and revenue > 0 and interest is not None:
+        out["interestIncomeToRevenuePct"] = round(interest / revenue * 100, 2)
+        out["incomePeriod"] = latest.get("date")
+    if out:
+        out["thresholds"] = {"debtToMarketCapPct": 30, "impermissibleIncomePct": 5}
+        out["note"] = (
+            "مؤشرات مساعدة محسوبة من بيانات Yahoo بحدود قرار الهيئة الشرعية للراجحي رقم 485. "
+            "دخل الفوائد جزء من الدخل المحرم لا كله، وهذه المؤشرات ليست حكمًا شرعيًّا."
+        )
+    return out
+
+
+@yfinance_server.tool(
+    name="get_sharia_status",
+    description="""Get the Sharia (Islamic) compliance classification of a US-listed stock or ETF.
+
+Primary source: Yaqeen (yaaqen.com), a free filter that applies the standards of Al-Rajhi's
+Sharia committee and shows each stock's last update date. Labels (Arabic): شرعي (compliant),
+غير شرعي (non-compliant), محل نظر (questionable).
+
+When Yaqeen rates the stock محل نظر or has no rating, the result also links the stock's page on
+Chart Idea (chart-idea.com, same standards) for a manual check, because that site blocks
+automated queries, and adds indicative ratios computed from Yahoo data (debt to market cap,
+interest income to revenue) against the 30% / 5% thresholds. The ratios are not a ruling.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "AAPL"
+""",
+)
+async def get_sharia_status(ticker: str) -> str:
+    """Sharia classification: Yaqeen first, then a Chart Idea link and indicative ratios."""
+    symbol = _symbol(ticker)
+    if not symbol:
+        return f"Error: getting sharia status for {ticker}: empty ticker symbol"
+    try:
+        res = await yd.cached_call(
+            key=f"sharia|yaqeen|{symbol}",
+            family="yaqeen",
+            fn=lambda: sharia.fetch_yaqeen(symbol),
+            fresh_ttl=SHARIA_FRESH,
+            stale_ttl=SHARIA_STALE,
+            budget=SHARIA_BUDGET,
+        )
+        yaqeen = dict(res.value)
+        yaqeen["checkedAt"] = yd.utc_iso(time.time() - res.age)
+        if res.stale:
+            yaqeen["stale"] = True
+            yaqeen["staleReason"] = _friendly(yd.Unavailable(res.note or ""))
+    except yd.UpstreamError as exc:
+        yaqeen = {
+            "source": "يقين",
+            "url": f"{sharia.YAQEEN_BASE}/stocks/{symbol}",
+            "available": False,
+            "reason": _describe(exc),
+        }
+
+    result: dict[str, Any] = {"symbol": symbol}
+    definitive = yaqeen.get("available") and yaqeen.get("code") in ("compliant", "non_compliant", "mixed")
+    if definitive:
+        result["verdict"] = yaqeen["label"]
+        result["verdictSource"] = "يقين"
+        result["sources"] = [yaqeen]
+    else:
+        result["verdict"] = yaqeen.get("label") or "غير متاح"
+        result["verdictSource"] = "يقين" if yaqeen.get("label") else None
+        result["sources"] = [yaqeen, sharia.chart_idea_link(symbol)]
+        result["nextStep"] = "تحقق من صفحة السهم في شارت آيديا (الرابط في المصادر)."
+        indicators = await _sharia_indicators(symbol)
+        if indicators:
+            result["indicators"] = indicators
+    result["disclaimer"] = "التصنيف منقول عن الجهة المذكورة وفق معاييرها، وليس فتوى."
+    return json.dumps(result, ensure_ascii=False, default=_json_default)
 
 
 # ==========================================================================

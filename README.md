@@ -45,6 +45,12 @@ The server exposes the following tools through the Model Context Protocol:
 |------|-------------|
 | `get_recommendations` | Get analyst recommendations or upgrades/downgrades history |
 
+### Sharia Screening
+
+| Tool | Description |
+|------|-------------|
+| `get_sharia_status` | Sharia classification from [Yaqeen](https://yaaqen.com/stocks) (Al-Rajhi committee standards), with its update date. When Yaqeen says "محل نظر" or has no rating, adds a link to the stock on [Chart Idea](https://chart-idea.com/filter/) for a manual check (that site blocks automated queries) and indicative ratios from Yahoo data. Yaqeen is queried politely: robots.txt honoured, requests spaced, results cached for an hour. |
+
 ## Real-World Use Cases
 
 With this MCP server, you can use Claude to:
