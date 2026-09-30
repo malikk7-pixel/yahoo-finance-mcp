@@ -27,6 +27,10 @@ import yahoo_data as yd
 
 YAQEEN_BASE = "https://yaaqen.com"
 CHART_IDEA_PAGE = "https://chart-idea.com/filter/company_detail/{symbol}/"
+# Stock Hunter's filter ("نبض الأسهم") shows per-stock results only after login,
+# its pages carry reCAPTCHA and its robots.txt could not be read (checked
+# 30 Sep 2026), so it is linked for a manual check and never fetched.
+STOCK_HUNTER_PAGE = "https://usastockhunteracademy.com/halal-stocks-usa/"
 USER_AGENT = "Mozilla/5.0 (compatible; YahooFinanceMCP-ShariaCheck/1.0; personal use)"
 MIN_INTERVAL = 1.5  # seconds between two requests to yaaqen.com
 ROBOTS_TTL = 24 * 3600.0
@@ -184,6 +188,17 @@ def chart_idea_link(symbol: str) -> dict[str, Any]:
         "url": CHART_IDEA_PAGE.format(symbol=_urlquote(symbol, safe="")),
         "available": False,
         "reason": "يحجب الموقع الاستعلام الآلي بصفحة تحقق أمني؛ افتح الرابط للتحقق يدويًّا",
+    }
+
+
+def stock_hunter_link(symbol: str) -> dict[str, Any]:
+    return {
+        "source": "صائد الأسهم (نبض الأسهم)",
+        "standard": "الراجحي والبلاد ودار الإفتاء المصرية",
+        "url": STOCK_HUNTER_PAGE,
+        "symbol": symbol,
+        "available": False,
+        "reason": "نتيجة السهم تظهر بعد تسجيل الدخول في الموقع؛ ابحث عن الرمز يدويًّا",
     }
 
 

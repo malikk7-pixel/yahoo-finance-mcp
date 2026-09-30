@@ -45,6 +45,16 @@ EXPECTED_TOOL_SCHEMAS = {
         "defaults": {"months_back": 12},
     },
     "get_sharia_status": {"required": ["ticker"], "properties": ["ticker"]},
+    "get_quotes": {
+        "required": ["tickers"],
+        "properties": ["tickers", "spark"],
+        "defaults": {"spark": True},
+    },
+    "get_market_movers": {
+        "required": [],
+        "properties": ["screen", "count", "nasdaq_only"],
+        "defaults": {"screen": "day_gainers", "count": 25, "nasdaq_only": False},
+    },
 }
 
 
@@ -107,7 +117,7 @@ async def test_stdio_preserves_legacy_initialize_and_tool_schemas():
 
         for tool_name, expected in EXPECTED_TOOL_SCHEMAS.items():
             schema = tools[tool_name]["inputSchema"]
-            assert schema["required"] == expected["required"]
+            assert schema.get("required", []) == expected["required"]
             assert set(schema["properties"]) == set(expected["properties"])
             for property_name, default in expected.get("defaults", {}).items():
                 assert schema["properties"][property_name]["default"] == default

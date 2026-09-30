@@ -40,10 +40,11 @@ import pandas as pd
 import yfinance as yf
 from mcp.server import MCPServer
 
+import market
 import sharia
 import yahoo_data as yd
 
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -179,6 +180,8 @@ Available tools:
 - get_option_chain: Fetch the option chain for a given ticker symbol, expiration date, and option type.
 - get_recommendations: Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
 - get_sharia_status: Get the Sharia compliance classification of a stock (Yaqeen first; Chart Idea link and indicative ratios when Yaqeen says محل نظر).
+- get_quotes: Compact live quotes for up to 40 tickers in one call, with the day's levels (pre-market high/low, VWAP, opening range, previous session high/low, ATR14), relative volume and float rotation. Prefer it over repeated get_stock_info calls when watching several symbols.
+- get_market_movers: Yahoo screeners (day_gainers, day_losers, most_actives, small_cap_gainers, aggressive_small_caps, most_shorted_stocks), Yahoo trending tickers, or "premarket" (a session-aware scan of the trending and screener names ranked by their move).
 
 Data freshness: prices in get_stock_info come live from Yahoo's chart feed.
 Fundamentals (float, short interest, ownership, ratios) can be cached for up
@@ -310,53 +313,26 @@ def _fetch_info(symbol: str) -> dict[str, Any]:
     return info
 
 
-def _quote_calls(symbol: str) -> list:
-    """Concurrent fetches that make up a quote: (name, awaitable)."""
+def _quote_calls(symbol: str, splits: bool = True) -> list:
+    """Concurrent fetches that make up a quote: (name, awaitable).
+
+    ``splits=False`` leaves out the long split-history chart (get_quotes does
+    not report splits). Coroutines are only created for calls that are made.
+    """
+    specs = [
+        ("intraday", f"chart1d|{symbol}", "chart", QUOTE_FRESH, QUOTE_STALE, QUOTE_BUDGET,
+         lambda: yd.fetch_chart(symbol, range_="1d", interval="1m", prepost=True)),
+        ("daily", f"chart3mo|{symbol}", "chart", DAILY_FRESH, DAILY_STALE, QUOTE_BUDGET,
+         lambda: yd.fetch_chart(symbol, range_="3mo", interval="1d")),
+        ("splits", f"splits|{symbol}", "chart", SPLITS_FRESH, SPLITS_STALE, QUOTE_BUDGET,
+         lambda: yd.fetch_chart(symbol, range_="max", interval="3mo", events="splits")),
+        ("info", f"info|{symbol}", "quoteSummary", INFO_FRESH, INFO_STALE, ENRICH_WAIT,
+         lambda: _fetch_info(symbol)),
+    ]
     return [
-        (
-            "intraday",
-            yd.cached_call(
-                key=f"chart1d|{symbol}",
-                family="chart",
-                fn=lambda: yd.fetch_chart(symbol, range_="1d", interval="1m", prepost=True),
-                fresh_ttl=QUOTE_FRESH,
-                stale_ttl=QUOTE_STALE,
-                budget=QUOTE_BUDGET,
-            ),
-        ),
-        (
-            "daily",
-            yd.cached_call(
-                key=f"chart3mo|{symbol}",
-                family="chart",
-                fn=lambda: yd.fetch_chart(symbol, range_="3mo", interval="1d"),
-                fresh_ttl=DAILY_FRESH,
-                stale_ttl=DAILY_STALE,
-                budget=QUOTE_BUDGET,
-            ),
-        ),
-        (
-            "splits",
-            yd.cached_call(
-                key=f"splits|{symbol}",
-                family="chart",
-                fn=lambda: yd.fetch_chart(symbol, range_="max", interval="3mo", events="splits"),
-                fresh_ttl=SPLITS_FRESH,
-                stale_ttl=SPLITS_STALE,
-                budget=QUOTE_BUDGET,
-            ),
-        ),
-        (
-            "info",
-            yd.cached_call(
-                key=f"info|{symbol}",
-                family="quoteSummary",
-                fn=lambda: _fetch_info(symbol),
-                fresh_ttl=INFO_FRESH,
-                stale_ttl=INFO_STALE,
-                budget=ENRICH_WAIT,
-            ),
-        ),
+        (name, yd.cached_call(key=key, family=family, fn=fn, fresh_ttl=fresh, stale_ttl=stale, budget=budget))
+        for name, key, family, fresh, stale, budget, fn in specs
+        if splits or name != "splits"
     ]
 
 
@@ -1042,13 +1018,244 @@ async def get_sharia_status(ticker: str) -> str:
     else:
         result["verdict"] = yaqeen.get("label") or "غير متاح"
         result["verdictSource"] = "يقين" if yaqeen.get("label") else None
-        result["sources"] = [yaqeen, sharia.chart_idea_link(symbol)]
-        result["nextStep"] = "تحقق من صفحة السهم في شارت آيديا (الرابط في المصادر)."
+        result["sources"] = [yaqeen, sharia.chart_idea_link(symbol), sharia.stock_hunter_link(symbol)]
+        result["nextStep"] = "تحقق من صفحة السهم في شارت آيديا (الرابط في المصادر)، ثم في صائد الأسهم إن أردت رأيًا ثالثًا."
         indicators = await _sharia_indicators(symbol)
         if indicators:
             result["indicators"] = indicators
     result["disclaimer"] = "التصنيف منقول عن الجهة المذكورة وفق معاييرها، وليس فتوى."
     return json.dumps(result, ensure_ascii=False, default=_json_default)
+
+
+# ==========================================================================
+# get_quotes / get_market_movers: compact data for dashboards and scans
+# ==========================================================================
+
+QUOTES_BUDGET = 20.0
+QUOTES_MAX = 40
+QUOTES_PARALLEL = 8
+MOVERS_FRESH, MOVERS_STALE = 60.0, 30 * 60.0
+MOVERS_BUDGET = 15.0
+PREMARKET_UNIVERSE = 40
+
+
+def _parse_tickers(text: str) -> list[str]:
+    out: list[str] = []
+    for part in re.split(r"[\s,;|]+", text or ""):
+        sym = _symbol(part)
+        if sym and sym not in out and re.fullmatch(r"[A-Z0-9^=.\-]{1,15}", sym):
+            out.append(sym)
+    return out
+
+
+async def _compact(symbol: str, sem: asyncio.Semaphore, with_spark: bool) -> dict[str, Any]:
+    async with sem:
+        names, calls = zip(*_quote_calls(symbol, splits=False))
+        outcomes = dict(zip(names, await asyncio.gather(*calls, return_exceptions=True)))
+
+    def ok(name: str) -> yd.Result | None:
+        value = outcomes.get(name)
+        return value if isinstance(value, yd.Result) else None
+
+    intraday, daily, info = ok("intraday"), ok("daily"), ok("info")
+    enrichment = info.value if info is not None and isinstance(info.value, dict) else None
+    err = outcomes.get("intraday")
+    if isinstance(err, yd.NotFound):
+        raise err  # the chart endpoint is authoritative about unknown symbols
+    if intraday is None and not enrichment:
+        raise err if isinstance(err, BaseException) else yd.UpstreamError("no data")
+    rec = market.compact_quote(
+        symbol,
+        intraday.value if intraday else None,
+        daily.value if daily else None,
+        enrichment,
+        info.age if info is not None else None,
+        with_spark=with_spark,
+    )
+    status: dict[str, Any] = {}
+    if intraday is not None:
+        status["quote"] = "stale" if intraday.stale else "live"
+        status["quoteAgeSeconds"] = int(intraday.age)
+    else:
+        status["quote"] = "from quoteSummary"
+    status["fundamentals"] = (
+        "unavailable" if info is None else "stale" if info.stale else "fresh" if info.age < 60 else "cached"
+    )
+    if info is not None:
+        status["fundamentalsAgeSeconds"] = int(info.age)
+    rec["dataStatus"] = status
+    return rec
+
+
+async def _compact_many(symbols: list[str], with_spark: bool, budget: float) -> tuple[list, dict]:
+    sem = asyncio.Semaphore(QUOTES_PARALLEL)
+    tasks = {s: asyncio.ensure_future(_compact(s, sem, with_spark)) for s in symbols}
+    _, pending = await asyncio.wait(tasks.values(), timeout=budget)
+    quotes: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    for sym, task in tasks.items():
+        if task in pending:
+            task.cancel()  # the Yahoo requests keep running and fill the cache
+            errors[sym] = "still loading; ask again in a few seconds"
+            continue
+        exc = task.exception()
+        if exc is None:
+            quotes.append(task.result())
+        elif isinstance(exc, yd.NotFound):
+            errors[sym] = "not found on Yahoo"
+        else:
+            errors[sym] = _friendly(exc)
+    return quotes, errors
+
+
+@yfinance_server.tool(
+    name="get_quotes",
+    description="""Compact live quotes for several tickers in one call (up to 40), for watchlists and scans.
+
+Each quote has: session-aware price and change (pre-market price against the last close before the
+open, regular price against the previous close, after-hours price), open, day high/low, volume,
+average volume, relative volume (rvol), float shares, float rotation (today's volume across all
+sessions / float), market cap, short % of float, 52-week range, and "levels": pre-market high/low
+and VWAP, regular-session VWAP, opening range (first 5 minutes), previous session high/low/close,
+ATR(14) and the 20-session high/low. With spark=true it adds a 10-minute sparkline of the day.
+Symbols that are not ready within the time budget are listed under "errors" and can be asked again.
+
+Args:
+    tickers: str
+        Ticker symbols separated by commas or spaces, e.g. "AAPL, MSFT, QQQ"
+    spark: bool
+        Include the 10-minute sparkline (default true)
+""",
+)
+async def get_quotes(tickers: str, spark: bool = True) -> str:
+    symbols = _parse_tickers(tickers)
+    if not symbols:
+        return f"Error: getting quotes for {tickers}: no valid ticker symbols"
+    dropped = symbols[QUOTES_MAX:]
+    symbols = symbols[:QUOTES_MAX]
+    try:
+        quotes, errors = await _compact_many(symbols, bool(spark), QUOTES_BUDGET)
+    except Exception as exc:  # never let one batch break the server
+        log.exception("get_quotes failed")
+        return f"Error: getting quotes for {tickers}: {_describe(exc)}"
+    for sym in dropped:
+        errors[sym] = f"skipped: at most {QUOTES_MAX} symbols per call"
+    payload: dict[str, Any] = {"asOf": yd.utc_iso(time.time()), "count": len(quotes), "quotes": quotes}
+    if errors:
+        payload["errors"] = errors
+    payload["notes"] = [
+        "Prices come from Yahoo's chart feed; quoteSource says whether Yahoo marks them real-time or delayed.",
+        "floatRotation counts pre-market, regular and after-hours volume of sessionDate.",
+        "atr14 is the simple average of the last 14 true ranges of completed daily sessions.",
+    ]
+    return json.dumps(payload, default=_json_default)
+
+
+async def _screen(screen: str, count: int) -> dict[str, Any]:
+    res = await yd.cached_call(
+        key=f"screen|{screen}|{count}",
+        family="screener",
+        fn=lambda: market.fetch_screener(market.SCREENS[screen], count),
+        fresh_ttl=MOVERS_FRESH,
+        stale_ttl=MOVERS_STALE,
+        budget=MOVERS_BUDGET,
+    )
+    data = dict(res.value)
+    data["ageSeconds"] = int(res.age)
+    if res.stale:
+        data["stale"] = True
+    return data
+
+
+async def _trending(count: int) -> list[str]:
+    res = await yd.cached_call(
+        key=f"trending|{count}",
+        family="screener",
+        fn=lambda: market.fetch_trending(count),
+        fresh_ttl=MOVERS_FRESH,
+        stale_ttl=MOVERS_STALE,
+        budget=MOVERS_BUDGET,
+    )
+    return [s for s in res.value if market.is_plain_us_stock(s)]
+
+
+def _mover_row(q: dict[str, Any]) -> dict[str, Any]:
+    keep = ("symbol", "name", "exchange", "session", "price", "priceSession", "reference", "changePct",
+            "quoteTime", "regularPrice", "prevClose", "regularChangePct", "volume", "avgVolume", "rvol",
+            "preVolume", "floatShares", "floatRotation", "marketCap", "shortPctFloat", "quoteSource",
+            "levels", "sessionDate")
+    return {k: q.get(k) for k in keep if q.get(k) is not None}
+
+
+@yfinance_server.tool(
+    name="get_market_movers",
+    description="""US market movers from Yahoo Finance.
+
+screen:
+    day_gainers | day_losers | most_actives | small_cap_gainers | aggressive_small_caps |
+    most_shorted_stocks  -> Yahoo's predefined screeners (regular-session change and volume)
+    trending             -> Yahoo's trending US tickers, with compact quotes
+    premarket            -> scan of the trending, gainers, most-active and small-cap-gainer names,
+                            ranked by their session-aware move (pre-market price against the last
+                            close before the open), with levels and float rotation
+count: how many rows (1-50, default 25)
+nasdaq_only: keep only Nasdaq-listed names (default false)
+
+These lists are what Yahoo publishes; they are not a complete market scan.
+""",
+)
+async def get_market_movers(screen: str = "day_gainers", count: int = 25, nasdaq_only: bool = False) -> str:
+    screen = (screen or "day_gainers").strip().lower()
+    try:
+        count = max(1, min(int(count or 25), 50))
+    except (TypeError, ValueError):
+        count = 25
+    if screen not in market.SCREENS and screen not in market.COMPOSITE_SCREENS:
+        options = ", ".join(list(market.SCREENS) + list(market.COMPOSITE_SCREENS))
+        return f"Error: unknown screen {screen!r}. Use one of: {options}"
+    payload: dict[str, Any] = {"screen": screen, "asOf": yd.utc_iso(time.time())}
+    try:
+        if screen in market.SCREENS:
+            data = await _screen(screen, count)
+            rows = data["quotes"]
+            payload.update(title=data.get("title"), ageSeconds=data.get("ageSeconds"), source="Yahoo predefined screener")
+            if data.get("stale"):
+                payload["stale"] = True
+        else:
+            if screen == "trending":
+                symbols = (await _trending(max(count, 20)))[:count]
+                sources = ["trending"]
+            else:
+                symbols, sources = [], []
+                for name in ("trending", "small_cap_gainers", "day_gainers", "most_actives"):
+                    try:
+                        found = await _trending(25) if name == "trending" else [
+                            r["symbol"] for r in (await _screen(name, 25))["quotes"]]
+                        sources.append(name)
+                    except yd.UpstreamError as exc:
+                        log.info("premarket scan: %s unavailable (%s)", name, exc)
+                        continue
+                    for s in found:
+                        if market.is_plain_us_stock(s) and s not in symbols:
+                            symbols.append(s)
+                symbols = symbols[:PREMARKET_UNIVERSE]
+            if not symbols:
+                return f"Error: getting market movers ({screen}): Yahoo returned no symbols"
+            quotes, errors = await _compact_many(symbols, False, QUOTES_BUDGET)
+            rows = [_mover_row(q) for q in quotes]
+            if screen == "premarket":
+                rows = [r for r in rows if r.get("changePct") is not None]
+                rows.sort(key=lambda r: abs(r["changePct"]), reverse=True)
+            payload.update(source="Yahoo " + " + ".join(sources), universe=len(symbols))
+            if errors:
+                payload["errors"] = errors
+    except yd.UpstreamError as exc:
+        return f"Error: getting market movers ({screen}): {_describe(exc)}"
+    if nasdaq_only:
+        rows = [r for r in rows if market.is_nasdaq(r.get("exchange"))]
+    payload["count"] = len(rows[:count])
+    payload["quotes"] = rows[:count]
+    return json.dumps(payload, default=_json_default)
 
 
 # ==========================================================================
@@ -1127,6 +1334,47 @@ async def _sharia_self_check() -> None:
         log.warning("sharia self-check %s failed: %s", SHARIA_SELF_CHECK, exc)
 
 
+# One batch quote and one screener request after start: the logs and /health
+# then show from the live server that get_quotes and get_market_movers work.
+DATA_SELF_CHECK = (os.environ.get("DATA_SELF_CHECK") or "QQQ,AAPL").strip().upper()
+DATA_CHECK_STATE: dict[str, Any] = {}
+
+
+async def _data_self_check() -> None:
+    if not DATA_SELF_CHECK or DATA_SELF_CHECK in ("0", "OFF", "NO"):
+        return
+    await asyncio.sleep(35)
+    state: dict[str, Any] = {"at": yd.utc_iso(time.time())}
+    try:
+        out = json.loads(await get_quotes(DATA_SELF_CHECK, spark=False))
+        state["quotes"] = {
+            q["symbol"]: {"price": q.get("price"), "session": q.get("session"),
+                          "levels": sorted((q.get("levels") or {}).keys())}
+            for q in out.get("quotes", [])
+        }
+        if out.get("errors"):
+            state["quoteErrors"] = out["errors"]
+        log.info("data self-check get_quotes: %s", json.dumps(state["quotes"], default=_json_default)[:500])
+    except Exception as exc:  # never let the check affect the server
+        state["quotesError"] = str(exc)[:200]
+        log.warning("data self-check get_quotes failed: %s", exc)
+    for screen in ("day_gainers", "trending"):
+        try:
+            text = await get_market_movers(screen, 5)
+            if text.startswith("Error"):
+                state[f"movers_{screen}"] = text[:200]
+                log.warning("data self-check %s: %s", screen, text[:200])
+            else:
+                out = json.loads(text)
+                state[f"movers_{screen}"] = [r.get("symbol") for r in out.get("quotes", [])]
+                log.info("data self-check %s: %s", screen, state[f"movers_{screen}"])
+        except Exception as exc:
+            state[f"movers_{screen}"] = f"failed: {str(exc)[:200]}"
+            log.warning("data self-check %s failed: %s", screen, exc)
+    DATA_CHECK_STATE.clear()
+    DATA_CHECK_STATE.update(state)
+
+
 def health_payload() -> dict[str, Any]:
     return {
         "status": "ok",
@@ -1141,6 +1389,7 @@ def health_payload() -> dict[str, Any]:
         },
         "keepalive": {"mode": KEEPALIVE_MODE, "target": bool(KEEPALIVE_URL), **KEEPALIVE_STATE},
         "shariaSelfCheck": SHARIA_CHECK_STATE,
+        "dataSelfCheck": DATA_CHECK_STATE,
         "upstream": yd.status_snapshot(),
     }
 
@@ -1180,6 +1429,7 @@ def build_web_app():
             async with session_manager.run():
                 keepalive = asyncio.create_task(_keepalive_loop())
                 self_check = asyncio.create_task(_sharia_self_check())
+                data_check = asyncio.create_task(_data_self_check())
                 try:
                     await send({"type": "lifespan.startup.complete"})
                     started = True
@@ -1193,6 +1443,7 @@ def build_web_app():
                 finally:
                     keepalive.cancel()
                     self_check.cancel()
+                    data_check.cancel()
         except BaseException as exc:  # noqa: BLE001 - report to the server
             log.exception("lifespan failure")
             kind = "lifespan.shutdown.failed" if started else "lifespan.startup.failed"

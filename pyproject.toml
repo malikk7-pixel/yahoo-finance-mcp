@@ -35,7 +35,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["server.py", "yahoo_data.py", "sharia.py"]
+only-include = ["server.py", "yahoo_data.py", "sharia.py", "market.py"]
 
 [tool.black]
 line-length = 100
