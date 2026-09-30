@@ -9,7 +9,10 @@ the levels a day trader reads first:
 * pre-market high / low / volume and VWAP of the regular session;
 * opening range (first five minutes), previous session high / low;
 * ATR(14) from completed daily sessions;
-* relative volume and float rotation (volume / free float);
+* relative volume, paced relative volume (against what a typical day has
+  traded by this time) and float rotation (volume / free float);
+* the fields that place a stock in a category: sector, industry, country,
+  first trade date, last split and the earnings date;
 * a 10-minute sparkline of the whole trading day.
 
 Everything here is a pure function of chart / quoteSummary payloads, so it is
@@ -27,6 +30,32 @@ import yahoo_data as yd
 SPARK_STEP = 600  # seconds per sparkline bucket
 SPARK_MAX = 120  # at most 20 hours of 10-minute buckets
 OPENING_RANGE_SECONDS = 300
+
+# Share of a typical regular session's volume that has traded N minutes after
+# the open: a smoothed U-shaped profile of US equities (a heavy first hour, a
+# quiet midday, a heavy last half hour with the closing auction). It paces
+# relative volume during the day; it is an estimate, not a measured curve.
+VOLUME_PROFILE = (
+    (0, 0.0), (15, 0.09), (30, 0.15), (60, 0.24), (90, 0.31), (150, 0.42),
+    (210, 0.51), (270, 0.60), (330, 0.71), (360, 0.79), (380, 0.88), (390, 1.0),
+)
+PACE_MIN_MINUTES = 5  # too few minutes make the paced figure meaningless
+
+
+def volume_share(minutes: float) -> float:
+    """Expected share of a full regular session's volume after ``minutes`` of trading."""
+    if minutes <= 0:
+        return 0.0
+    for (m0, s0), (m1, s1) in zip(VOLUME_PROFILE, VOLUME_PROFILE[1:]):
+        if minutes <= m1:
+            return s0 + (s1 - s0) * (minutes - m0) / (m1 - m0)
+    return 1.0
+
+
+def _iso_day(seconds: float | None) -> str | None:
+    if not seconds:
+        return None
+    return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc).date().isoformat()
 
 # Yahoo's predefined screeners that make sense for a US day trader.
 SCREENS = {
@@ -232,6 +261,15 @@ def compact_quote(
     if avg:
         if reg_b:
             out["rvol"] = round(reg_vol_today / avg, 3)
+            # Paced relative volume: today's regular volume against what a typical
+            # day has traded by this time. After the close it equals rvol.
+            if session == "regular":
+                minutes = (now - reg_b[0].ts) / 60.0
+                share = volume_share(minutes)
+                if minutes >= PACE_MIN_MINUTES and share > 0:
+                    out["rvolPace"] = round(reg_vol_today / (avg * share), 3)
+            else:
+                out["rvolPace"] = out["rvol"]
         if out.get("preVolume"):
             out["preVolumeVsAvg"] = round(out["preVolume"] / avg, 4)
     flt = out.get("floatShares")
@@ -243,6 +281,22 @@ def compact_quote(
     vwap = levels.get("vwap")
     if vwap and price is not None and session in ("regular", "post"):
         out["vsVwapPct"] = round((price / vwap - 1.0) * 100.0, 3)
+
+    # What a dashboard needs to place the stock in a category (small biotech,
+    # recent IPO, foreign small cap, reverse split, earnings day, ...). Sector,
+    # industry, country and the earnings date come from quoteSummary, so they
+    # are missing while Yahoo rate-limits that endpoint.
+    out["firstTradeDate"] = _iso_day((yd.num(q.get("firstTradeDateMilliseconds")) or 0) / 1000.0)
+    for key in ("sector", "industry", "country"):
+        if q.get(key):
+            out[key] = str(q[key])
+    split_t = yd.num(q.get("lastSplitDate"))
+    if q.get("lastSplitFactor") and split_t:
+        out["lastSplit"] = {"factor": str(q["lastSplitFactor"]), "date": _iso_day(split_t)}
+    earn = yd.num(q.get("earningsTimestamp")) or yd.num(q.get("earningsTimestampStart"))
+    if earn:
+        out["earningsDate"] = dt.datetime.fromtimestamp(earn, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out["earningsDateEstimate"] = bool(q.get("isEarningsDateEstimate"))
 
     if with_spark:
         out["spark"] = spark(day_bars)

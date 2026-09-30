@@ -111,6 +111,47 @@ def test_post_market_price_and_levels():
     assert q["levels"]["prevDate"] == str(TUE)
 
 
+def test_paced_rvol_during_the_session_and_after_the_close():
+    hist = history_until(TUE)  # every completed day traded 1,000,000 shares
+    bars = [(ts(WED, 9, 30), 10.0, 100_000), (ts(WED, 9, 59), 11.0, 140_000)]
+    chart = intraday(WED, bars, price=11.0, rmt=ts(WED, 9, 59), chart_prev=9.8, regularMarketVolume=240_000)
+    q = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 10, 0))
+    # 30 minutes after the first regular bar a typical day has traded 15% of its volume
+    assert market.volume_share(30) == pytest.approx(0.15)
+    assert q["rvol"] == pytest.approx(0.24)
+    assert q["rvolPace"] == pytest.approx(240_000 / (1_000_000 * 0.15), abs=1e-3)
+    # the first minutes are too few to pace
+    early = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 9, 33))
+    assert "rvolPace" not in early or early["session"] != "regular"
+    # after the close the paced figure is the plain relative volume
+    closed = [(ts(WED, 15, 59), 12.0, 100_000), (ts(WED, 16, 30), 12.6, 20_000)]
+    post = market.compact_quote("MSGY", intraday(WED, closed, price=12.0, rmt=ts(WED, 16, 0), chart_prev=11.0),
+                                daily_hl(hist), None, None, now=ts(WED, 17, 5))
+    assert post["rvolPace"] == post["rvol"]
+
+
+def test_volume_profile_is_monotonic_and_complete():
+    shares = [market.volume_share(m) for m in range(0, 400, 5)]
+    assert shares == sorted(shares)
+    assert market.volume_share(0) == 0.0 and market.volume_share(390) == 1.0 and market.volume_share(500) == 1.0
+
+
+def test_category_fields_come_from_the_chart_and_quote_summary():
+    info = dict(INFO, sector="Healthcare", industry="Biotechnology", country="Hong Kong",
+                lastSplitFactor="1:8", lastSplitDate=1786406400, earningsTimestamp=1790798400,
+                isEarningsDateEstimate=False)
+    chart = intraday(WED, [(ts(WED, 9, 30), 10.0, 100_000)], price=10.0, rmt=ts(WED, 9, 30), chart_prev=9.8)
+    q = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)), info, 30.0, now=ts(WED, 9, 45))
+    assert (q["sector"], q["industry"], q["country"]) == ("Healthcare", "Biotechnology", "Hong Kong")
+    assert q["lastSplit"] == {"factor": "1:8", "date": "2026-08-11"}
+    assert q["earningsDate"] == "2026-09-30T20:00:00Z" and q["earningsDateEstimate"] is False
+    assert q["firstTradeDate"] == "2024-12-27"  # the chart's firstTradeDate
+    # without quoteSummary only the chart's first trade date is known
+    bare = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)), None, None, now=ts(WED, 9, 45))
+    assert bare["firstTradeDate"] == "2024-12-27"
+    assert not {"sector", "industry", "country", "lastSplit", "earningsDate"} & set(bare)
+
+
 def test_atr14_matches_hand_computation():
     rows = []
     days = trading_days(TUE, 15)

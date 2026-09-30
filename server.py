@@ -44,7 +44,7 @@ import market
 import sharia
 import yahoo_data as yd
 
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.2.0"
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -1114,10 +1114,13 @@ async def _compact_many(symbols: list[str], with_spark: bool, budget: float) -> 
 
 Each quote has: session-aware price and change (pre-market price against the last close before the
 open, regular price against the previous close, after-hours price), open, day high/low, volume,
-average volume, relative volume (rvol), float shares, float rotation (today's volume across all
-sessions / float), market cap, short % of float, 52-week range, and "levels": pre-market high/low
-and VWAP, regular-session VWAP, opening range (first 5 minutes), previous session high/low/close,
-ATR(14) and the 20-session high/low. With spark=true it adds a 10-minute sparkline of the day.
+average volume, relative volume (rvol: regular volume so far / average daily volume), paced
+relative volume (rvolPace: against the share of a typical day's volume traded by this time, an
+estimate), float shares, float rotation (today's volume across all sessions / float), market cap,
+short % of float, 52-week range, sector, industry, country, first trade date, last split and
+earnings date, and "levels": pre-market high/low and VWAP, regular-session VWAP, opening range
+(first 5 minutes), previous session high/low/close, ATR(14) and the 20-session high/low.
+With spark=true it adds a 10-minute sparkline of the day.
 Symbols that are not ready within the time budget are listed under "errors" and can be asked again.
 
 Args:
