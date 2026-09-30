@@ -178,3 +178,15 @@ def test_unreachable_site_is_a_temporary_failure_not_a_verdict(monkeypatch):
     assert out["verdict"] == "غير متاح"
     assert "تعذّر الوصول" in out["sources"][0]["reason"]
     assert yd.CACHE.get("sharia|yaqeen|AAPL") is None  # nothing cached as a verdict
+
+
+def test_questionable_result_also_links_stock_hunter_for_a_manual_check(monkeypatch):
+    async def no_indicators(symbol):
+        return {}
+
+    monkeypatch.setattr(sharia, "fetch_yaqeen", lambda s: yaqeen_result("محل نظر"))
+    monkeypatch.setattr(server, "_sharia_indicators", no_indicators)
+    out = json.loads(asyncio.run(server.get_sharia_status("aapl")))
+    hunter = out["sources"][2]
+    assert hunter["url"] == sharia.STOCK_HUNTER_PAGE and hunter["available"] is False
+    assert hunter["symbol"] == "AAPL" and "تسجيل الدخول" in hunter["reason"]

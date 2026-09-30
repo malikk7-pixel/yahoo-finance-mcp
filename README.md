@@ -49,7 +49,14 @@ The server exposes the following tools through the Model Context Protocol:
 
 | Tool | Description |
 |------|-------------|
-| `get_sharia_status` | Sharia classification from [Yaqeen](https://yaaqen.com/stocks) (Al-Rajhi committee standards), with its update date. When Yaqeen says "محل نظر" or has no rating, adds a link to the stock on [Chart Idea](https://chart-idea.com/filter/) for a manual check (that site blocks automated queries) and indicative ratios from Yahoo data. Yaqeen is queried politely: robots.txt honoured, requests spaced, results cached for an hour. |
+| `get_sharia_status` | Sharia classification from [Yaqeen](https://yaaqen.com/stocks) (Al-Rajhi committee standards), with its update date. When Yaqeen says "محل نظر" or has no rating, adds links for a manual check on [Chart Idea](https://chart-idea.com/filter/) (it blocks automated queries) and on [Stock Hunter](https://usastockhunteracademy.com/halal-stocks-usa/) (results need a login), plus indicative ratios from Yahoo data. Yaqeen is queried politely: robots.txt honoured, requests spaced, results cached for an hour. |
+
+### Watchlists and Scans
+
+| Tool | Description |
+|------|-------------|
+| `get_quotes` | Compact live quotes for up to 40 tickers in one call: session-aware price and change, volume, relative volume, float rotation, market cap, short interest, and the day's levels (pre-market high/low, VWAP, opening range, previous session high/low, ATR14, 20-session high/low), with an optional 10-minute sparkline. Built for dashboards that refresh a whole watchlist at once. |
+| `get_market_movers` | Yahoo's predefined screeners (`day_gainers`, `day_losers`, `most_actives`, `small_cap_gainers`, `aggressive_small_caps`, `most_shorted_stocks`), Yahoo trending tickers (`trending`), or `premarket`: the trending and screener names ranked by their session-aware move, with levels and float rotation. `nasdaq_only` keeps Nasdaq listings. |
 
 ## Real-World Use Cases
 
@@ -227,6 +234,8 @@ therefore:
 | `YF_MAX_WORKERS` | `8` | Worker threads for Yahoo calls |
 | `YF_UPSTREAM_CONCURRENCY` | `4` | Simultaneous requests to Yahoo |
 | `YF_HTTP_TIMEOUT` | `8` | Seconds per Yahoo HTTP request |
+| `SHARIA_SELF_CHECK` | `AAPL` | Ticker looked up on Yaqeen 20 s after start (`off` to skip) |
+| `DATA_SELF_CHECK` | `QQQ,AAPL` | Tickers fetched with `get_quotes` 35 s after start, plus two screeners (`off` to skip) |
 
 A free Render workspace has 750 instance hours a month: one service kept awake
 around the clock uses about 744. If you run other free services in the same
