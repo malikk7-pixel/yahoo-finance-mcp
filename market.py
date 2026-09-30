@@ -293,9 +293,13 @@ def compact_quote(
     split_t = yd.num(q.get("lastSplitDate"))
     if q.get("lastSplitFactor") and split_t:
         out["lastSplit"] = {"factor": str(q["lastSplitFactor"]), "date": _iso_day(split_t)}
-    earn = yd.num(q.get("earningsTimestamp")) or yd.num(q.get("earningsTimestampStart"))
+    # Yahoo's earningsTimestamp is the last or the coming report and
+    # earningsTimestampStart the next scheduled one; they are equal on the day.
+    earn = sorted({int(t) for t in (yd.num(q.get("earningsTimestamp")), yd.num(q.get("earningsTimestampStart"))) if t})
     if earn:
-        out["earningsDate"] = dt.datetime.fromtimestamp(earn, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out["earningsDates"] = [
+            dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") for t in earn
+        ]
         out["earningsDateEstimate"] = bool(q.get("isEarningsDateEstimate"))
 
     if with_spark:

@@ -138,18 +138,24 @@ def test_volume_profile_is_monotonic_and_complete():
 
 def test_category_fields_come_from_the_chart_and_quote_summary():
     info = dict(INFO, sector="Healthcare", industry="Biotechnology", country="Hong Kong",
-                lastSplitFactor="1:8", lastSplitDate=1786406400, earningsTimestamp=1790798400,
-                isEarningsDateEstimate=False)
+                lastSplitFactor="1:8", lastSplitDate=1786406400, earningsTimestamp=1786019400,
+                earningsTimestampStart=1790798400, isEarningsDateEstimate=False)
     chart = intraday(WED, [(ts(WED, 9, 30), 10.0, 100_000)], price=10.0, rmt=ts(WED, 9, 30), chart_prev=9.8)
     q = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)), info, 30.0, now=ts(WED, 9, 45))
     assert (q["sector"], q["industry"], q["country"]) == ("Healthcare", "Biotechnology", "Hong Kong")
     assert q["lastSplit"] == {"factor": "1:8", "date": "2026-08-11"}
-    assert q["earningsDate"] == "2026-09-30T20:00:00Z" and q["earningsDateEstimate"] is False
+    # the last report (6 August) and the next one (30 September after the close)
+    assert q["earningsDates"] == ["2026-08-06T12:30:00Z", "2026-09-30T20:00:00Z"]
+    assert q["earningsDateEstimate"] is False
+    # on the report day both timestamps are the same report
+    same = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)),
+                                dict(info, earningsTimestamp=1790798400), 30.0, now=ts(WED, 9, 45))
+    assert same["earningsDates"] == ["2026-09-30T20:00:00Z"]
     assert q["firstTradeDate"] == "2024-12-27"  # the chart's firstTradeDate
     # without quoteSummary only the chart's first trade date is known
     bare = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)), None, None, now=ts(WED, 9, 45))
     assert bare["firstTradeDate"] == "2024-12-27"
-    assert not {"sector", "industry", "country", "lastSplit", "earningsDate"} & set(bare)
+    assert not {"sector", "industry", "country", "lastSplit", "earningsDates"} & set(bare)
 
 
 def test_atr14_matches_hand_computation():
