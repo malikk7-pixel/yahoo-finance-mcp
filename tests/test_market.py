@@ -44,7 +44,7 @@ def history_until(day, n=20):
 
 
 INFO = {"symbol": "MSGY", "quoteType": "EQUITY", "floatShares": 800_000, "sharesOutstanding": 2_000_000,
-        "marketCap": 9_000_000, "shortPercentOfFloat": 0.15, "quoteSourceName": "Nasdaq Real Time Price"}
+        "marketCap": 9_000_000, "shortPercentOfFloat": 0.15, "shortRatio": 3.2, "quoteSourceName": "Nasdaq Real Time Price"}
 
 
 def test_pre_market_quote_has_pre_levels_rotation_and_no_regular_rvol():
@@ -90,11 +90,24 @@ def test_regular_session_vwap_opening_range_and_rvol():
     # typical price = close (high/low are close +/- 0.05): (10*1 + 11*1 + 12*2) / 4 = 11.25
     assert lv["vwap"] == pytest.approx(11.25)
     assert lv["orHigh"] == pytest.approx(11.05) and lv["orLow"] == pytest.approx(9.95)
+    # the first 5-minute candle opened at 10.0 and closed at 11.0 (green), and it has closed
+    assert lv["orOpen"] == pytest.approx(10.0) and lv["orClose"] == pytest.approx(11.0)
+    assert q["daysToCover"] == pytest.approx(3.2)
     assert q["rvol"] == pytest.approx(0.4)  # 400k regular volume / 1M average
     assert q["volumeAllSessions"] == 450_000
     assert q["floatRotation"] == pytest.approx(450_000 / 800_000, abs=1e-3)
     assert q["vsVwapPct"] == pytest.approx((12.0 / 11.25 - 1) * 100, abs=1e-3)
     assert q["dollarVolume"] == int(400_000 * 11.25)
+
+
+def test_first_candle_is_reported_only_after_it_closes():
+    hist = history_until(TUE)
+    bars = [(ts(WED, 9, 30), 10.0, 100_000), (ts(WED, 9, 31), 9.8, 50_000)]
+    chart = intraday(WED, bars, price=9.8, rmt=ts(WED, 9, 31), chart_prev=9.9, regularMarketVolume=150_000)
+    q = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 9, 32))
+    assert "orOpen" not in q["levels"] and "orClose" not in q["levels"]
+    q = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 9, 36))
+    assert q["levels"]["orOpen"] == pytest.approx(10.0) and q["levels"]["orClose"] == pytest.approx(9.8)
 
 
 def test_post_market_price_and_levels():
@@ -109,6 +122,53 @@ def test_post_market_price_and_levels():
     assert q["levels"]["postHigh"] == pytest.approx(12.65)
     # the Wednesday daily bar is the session in progress, so "previous" is still Tuesday
     assert q["levels"]["prevDate"] == str(TUE)
+
+
+def test_paced_rvol_during_the_session_and_after_the_close():
+    hist = history_until(TUE)  # every completed day traded 1,000,000 shares
+    bars = [(ts(WED, 9, 30), 10.0, 100_000), (ts(WED, 9, 59), 11.0, 140_000)]
+    chart = intraday(WED, bars, price=11.0, rmt=ts(WED, 9, 59), chart_prev=9.8, regularMarketVolume=240_000)
+    q = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 10, 0))
+    # 30 minutes after the first regular bar a typical day has traded 15% of its volume
+    assert market.volume_share(30) == pytest.approx(0.15)
+    assert q["rvol"] == pytest.approx(0.24)
+    assert q["rvolPace"] == pytest.approx(240_000 / (1_000_000 * 0.15), abs=1e-3)
+    # the first minutes are too few to pace
+    early = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 9, 33))
+    assert "rvolPace" not in early or early["session"] != "regular"
+    # after the close the paced figure is the plain relative volume
+    closed = [(ts(WED, 15, 59), 12.0, 100_000), (ts(WED, 16, 30), 12.6, 20_000)]
+    post = market.compact_quote("MSGY", intraday(WED, closed, price=12.0, rmt=ts(WED, 16, 0), chart_prev=11.0),
+                                daily_hl(hist), None, None, now=ts(WED, 17, 5))
+    assert post["rvolPace"] == post["rvol"]
+
+
+def test_volume_profile_is_monotonic_and_complete():
+    shares = [market.volume_share(m) for m in range(0, 400, 5)]
+    assert shares == sorted(shares)
+    assert market.volume_share(0) == 0.0 and market.volume_share(390) == 1.0 and market.volume_share(500) == 1.0
+
+
+def test_category_fields_come_from_the_chart_and_quote_summary():
+    info = dict(INFO, sector="Healthcare", industry="Biotechnology", country="Hong Kong",
+                lastSplitFactor="1:8", lastSplitDate=1786406400, earningsTimestamp=1786019400,
+                earningsTimestampStart=1790798400, isEarningsDateEstimate=False)
+    chart = intraday(WED, [(ts(WED, 9, 30), 10.0, 100_000)], price=10.0, rmt=ts(WED, 9, 30), chart_prev=9.8)
+    q = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)), info, 30.0, now=ts(WED, 9, 45))
+    assert (q["sector"], q["industry"], q["country"]) == ("Healthcare", "Biotechnology", "Hong Kong")
+    assert q["lastSplit"] == {"factor": "1:8", "date": "2026-08-11"}
+    # the last report (6 August) and the next one (30 September after the close)
+    assert q["earningsDates"] == ["2026-08-06T12:30:00Z", "2026-09-30T20:00:00Z"]
+    assert q["earningsDateEstimate"] is False
+    # on the report day both timestamps are the same report
+    same = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)),
+                                dict(info, earningsTimestamp=1790798400), 30.0, now=ts(WED, 9, 45))
+    assert same["earningsDates"] == ["2026-09-30T20:00:00Z"]
+    assert q["firstTradeDate"] == "2024-12-27"  # the chart's firstTradeDate
+    # without quoteSummary only the chart's first trade date is known
+    bare = market.compact_quote("MSGY", chart, daily_hl(history_until(TUE)), None, None, now=ts(WED, 9, 45))
+    assert bare["firstTradeDate"] == "2024-12-27"
+    assert not {"sector", "industry", "country", "lastSplit", "earningsDates"} & set(bare)
 
 
 def test_atr14_matches_hand_computation():
@@ -220,6 +280,8 @@ def test_market_movers_screen_premarket_and_filters(monkeypatch):
     assert {r["symbol"] for r in out["quotes"]} == {"ZZZ", "AAA", "BBB"}
     assert all(r["session"] == "pre" and r["changePct"] is not None for r in out["quotes"])
     assert "levels" in out["quotes"][0]
+    row = out["quotes"][0]  # the fields that place a row in a category travel with it
+    assert row["sharesOutstanding"] == 2_000_000 and row["country"] == "Hong Kong" and row["firstTradeDate"] == "2024-12-27"
 
     assert asyncio.run(server.get_market_movers("nonsense")).startswith("Error: unknown screen")
 

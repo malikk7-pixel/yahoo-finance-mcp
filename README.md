@@ -55,8 +55,8 @@ The server exposes the following tools through the Model Context Protocol:
 
 | Tool | Description |
 |------|-------------|
-| `get_quotes` | Compact live quotes for up to 40 tickers in one call: session-aware price and change, volume, relative volume, float rotation, market cap, short interest, and the day's levels (pre-market high/low, VWAP, opening range, previous session high/low, ATR14, 20-session high/low), with an optional 10-minute sparkline. Built for dashboards that refresh a whole watchlist at once. |
-| `get_market_movers` | Yahoo's predefined screeners (`day_gainers`, `day_losers`, `most_actives`, `small_cap_gainers`, `aggressive_small_caps`, `most_shorted_stocks`), Yahoo trending tickers (`trending`), or `premarket`: the trending and screener names ranked by their session-aware move, with levels and float rotation. `nasdaq_only` keeps Nasdaq listings. |
+| `get_quotes` | Compact live quotes for up to 40 tickers in one call: session-aware price and change, volume, relative volume (plain, and paced against what a typical day has traded by this time), float rotation, market cap, short interest and days to cover, the fields that place a stock in a category (sector, industry, country, first trade date, last split, earnings date), and the day's levels (pre-market high/low, VWAP, opening range and the open/close of the first 5-minute candle, previous session high/low, ATR14, 20-session high/low), with an optional 10-minute sparkline. Built for dashboards that refresh a whole watchlist at once. |
+| `get_market_movers` | Yahoo's predefined screeners (`day_gainers`, `day_losers`, `most_actives`, `small_cap_gainers`, `aggressive_small_caps`, `most_shorted_stocks`), Yahoo trending tickers (`trending`), or `premarket`: the trending and screener names ranked by their session-aware move, with levels and float rotation. Rows also carry shares outstanding, days to cover, and, when Yahoo sends them, the first trade date, sector, industry and country. `nasdaq_only` keeps Nasdaq listings. |
 
 ## Real-World Use Cases
 

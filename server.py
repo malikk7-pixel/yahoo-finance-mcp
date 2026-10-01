@@ -44,7 +44,7 @@ import market
 import sharia
 import yahoo_data as yd
 
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.2.0"
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -1114,10 +1114,14 @@ async def _compact_many(symbols: list[str], with_spark: bool, budget: float) -> 
 
 Each quote has: session-aware price and change (pre-market price against the last close before the
 open, regular price against the previous close, after-hours price), open, day high/low, volume,
-average volume, relative volume (rvol), float shares, float rotation (today's volume across all
-sessions / float), market cap, short % of float, 52-week range, and "levels": pre-market high/low
-and VWAP, regular-session VWAP, opening range (first 5 minutes), previous session high/low/close,
-ATR(14) and the 20-session high/low. With spark=true it adds a 10-minute sparkline of the day.
+average volume, relative volume (rvol: regular volume so far / average daily volume), paced
+relative volume (rvolPace: against the share of a typical day's volume traded by this time, an
+estimate), float shares, float rotation (today's volume across all sessions / float), market cap,
+short % of float and days to cover, 52-week range, sector, industry, country, first trade date,
+last split and earnings date, and "levels": pre-market high/low and VWAP, regular-session VWAP,
+opening range (first 5 minutes; with the open and close of that first 5-minute candle once it has
+closed), previous session high/low/close, ATR(14) and the 20-session high/low.
+With spark=true it adds a 10-minute sparkline of the day.
 Symbols that are not ready within the time budget are listed under "errors" and can be asked again.
 
 Args:
@@ -1180,10 +1184,12 @@ async def _trending(count: int) -> list[str]:
 
 
 def _mover_row(q: dict[str, Any]) -> dict[str, Any]:
-    keep = ("symbol", "name", "exchange", "session", "price", "priceSession", "reference", "changePct",
+    keep = ("symbol", "name", "exchange", "quoteType", "session", "price", "priceSession", "reference", "changePct",
             "quoteTime", "regularPrice", "prevClose", "regularChangePct", "volume", "avgVolume", "rvol",
-            "preVolume", "floatShares", "floatRotation", "marketCap", "shortPctFloat", "quoteSource",
-            "levels", "sessionDate")
+            "preVolume", "floatShares", "sharesOutstanding", "floatRotation", "marketCap", "shortPctFloat",
+            "daysToCover", "quoteSource", "levels", "sessionDate",
+            # what a dashboard needs to place a row in a category (missing while quoteSummary is limited)
+            "firstTradeDate", "sector", "industry", "country")
     return {k: q.get(k) for k in keep if q.get(k) is not None}
 
 
@@ -1201,6 +1207,8 @@ screen:
 count: how many rows (1-50, default 25)
 nasdaq_only: keep only Nasdaq-listed names (default false)
 
+Each row carries the compact quote's price, volume and float fields, and, when Yahoo
+sends them, the first trade date, sector, industry and country.
 These lists are what Yahoo publishes; they are not a complete market scan.
 """,
 )
