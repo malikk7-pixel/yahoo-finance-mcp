@@ -1184,10 +1184,12 @@ async def _trending(count: int) -> list[str]:
 
 
 def _mover_row(q: dict[str, Any]) -> dict[str, Any]:
-    keep = ("symbol", "name", "exchange", "session", "price", "priceSession", "reference", "changePct",
+    keep = ("symbol", "name", "exchange", "quoteType", "session", "price", "priceSession", "reference", "changePct",
             "quoteTime", "regularPrice", "prevClose", "regularChangePct", "volume", "avgVolume", "rvol",
-            "preVolume", "floatShares", "floatRotation", "marketCap", "shortPctFloat", "quoteSource",
-            "levels", "sessionDate")
+            "preVolume", "floatShares", "sharesOutstanding", "floatRotation", "marketCap", "shortPctFloat",
+            "daysToCover", "quoteSource", "levels", "sessionDate",
+            # what a dashboard needs to place a row in a category (missing while quoteSummary is limited)
+            "firstTradeDate", "sector", "industry", "country")
     return {k: q.get(k) for k in keep if q.get(k) is not None}
 
 
@@ -1205,6 +1207,8 @@ screen:
 count: how many rows (1-50, default 25)
 nasdaq_only: keep only Nasdaq-listed names (default false)
 
+Each row carries the compact quote's price, volume and float fields, and, when Yahoo
+sends them, the first trade date, sector, industry and country.
 These lists are what Yahoo publishes; they are not a complete market scan.
 """,
 )

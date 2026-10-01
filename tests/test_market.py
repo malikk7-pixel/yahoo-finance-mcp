@@ -280,6 +280,8 @@ def test_market_movers_screen_premarket_and_filters(monkeypatch):
     assert {r["symbol"] for r in out["quotes"]} == {"ZZZ", "AAA", "BBB"}
     assert all(r["session"] == "pre" and r["changePct"] is not None for r in out["quotes"])
     assert "levels" in out["quotes"][0]
+    row = out["quotes"][0]  # the fields that place a row in a category travel with it
+    assert row["sharesOutstanding"] == 2_000_000 and row["country"] == "Hong Kong" and row["firstTradeDate"] == "2024-12-27"
 
     assert asyncio.run(server.get_market_movers("nonsense")).startswith("Error: unknown screen")
 
