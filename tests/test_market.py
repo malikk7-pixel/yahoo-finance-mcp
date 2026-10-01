@@ -44,7 +44,7 @@ def history_until(day, n=20):
 
 
 INFO = {"symbol": "MSGY", "quoteType": "EQUITY", "floatShares": 800_000, "sharesOutstanding": 2_000_000,
-        "marketCap": 9_000_000, "shortPercentOfFloat": 0.15, "quoteSourceName": "Nasdaq Real Time Price"}
+        "marketCap": 9_000_000, "shortPercentOfFloat": 0.15, "shortRatio": 3.2, "quoteSourceName": "Nasdaq Real Time Price"}
 
 
 def test_pre_market_quote_has_pre_levels_rotation_and_no_regular_rvol():
@@ -90,11 +90,24 @@ def test_regular_session_vwap_opening_range_and_rvol():
     # typical price = close (high/low are close +/- 0.05): (10*1 + 11*1 + 12*2) / 4 = 11.25
     assert lv["vwap"] == pytest.approx(11.25)
     assert lv["orHigh"] == pytest.approx(11.05) and lv["orLow"] == pytest.approx(9.95)
+    # the first 5-minute candle opened at 10.0 and closed at 11.0 (green), and it has closed
+    assert lv["orOpen"] == pytest.approx(10.0) and lv["orClose"] == pytest.approx(11.0)
+    assert q["daysToCover"] == pytest.approx(3.2)
     assert q["rvol"] == pytest.approx(0.4)  # 400k regular volume / 1M average
     assert q["volumeAllSessions"] == 450_000
     assert q["floatRotation"] == pytest.approx(450_000 / 800_000, abs=1e-3)
     assert q["vsVwapPct"] == pytest.approx((12.0 / 11.25 - 1) * 100, abs=1e-3)
     assert q["dollarVolume"] == int(400_000 * 11.25)
+
+
+def test_first_candle_is_reported_only_after_it_closes():
+    hist = history_until(TUE)
+    bars = [(ts(WED, 9, 30), 10.0, 100_000), (ts(WED, 9, 31), 9.8, 50_000)]
+    chart = intraday(WED, bars, price=9.8, rmt=ts(WED, 9, 31), chart_prev=9.9, regularMarketVolume=150_000)
+    q = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 9, 32))
+    assert "orOpen" not in q["levels"] and "orClose" not in q["levels"]
+    q = market.compact_quote("MSGY", chart, daily_hl(hist), INFO, 30.0, now=ts(WED, 9, 36))
+    assert q["levels"]["orOpen"] == pytest.approx(10.0) and q["levels"]["orClose"] == pytest.approx(9.8)
 
 
 def test_post_market_price_and_levels():

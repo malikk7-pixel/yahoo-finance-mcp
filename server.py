@@ -1117,9 +1117,10 @@ open, regular price against the previous close, after-hours price), open, day hi
 average volume, relative volume (rvol: regular volume so far / average daily volume), paced
 relative volume (rvolPace: against the share of a typical day's volume traded by this time, an
 estimate), float shares, float rotation (today's volume across all sessions / float), market cap,
-short % of float, 52-week range, sector, industry, country, first trade date, last split and
-earnings date, and "levels": pre-market high/low and VWAP, regular-session VWAP, opening range
-(first 5 minutes), previous session high/low/close, ATR(14) and the 20-session high/low.
+short % of float and days to cover, 52-week range, sector, industry, country, first trade date,
+last split and earnings date, and "levels": pre-market high/low and VWAP, regular-session VWAP,
+opening range (first 5 minutes; with the open and close of that first 5-minute candle once it has
+closed), previous session high/low/close, ATR(14) and the 20-session high/low.
 With spark=true it adds a 10-minute sparkline of the day.
 Symbols that are not ready within the time budget are listed under "errors" and can be asked again.
 

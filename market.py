@@ -191,6 +191,7 @@ def compact_quote(
         "sharesOutstanding": int(yd.num(q.get("sharesOutstanding")) or 0) or None,
         "marketCap": int(yd.num(q.get("marketCap")) or 0) or None,
         "shortPctFloat": yd.num(q.get("shortPercentOfFloat")),
+        "daysToCover": yd.num(q.get("shortRatio")),
         "quoteSource": q.get("quoteSourceName"),
     }
     if session == "post" or (session == "closed" and post is not None):
@@ -221,6 +222,11 @@ def compact_quote(
         opening = [b for b in reg_b if b.ts < first + OPENING_RANGE_SECONDS]
         hi, lo = _hi_lo(opening)
         levels.update(orHigh=rnd(hi), orLow=rnd(lo))
+        # The first five-minute candle's open and close, once that window has ended
+        # (breakout studies trade only in the direction of this candle).
+        if now >= first + OPENING_RANGE_SECONDS:
+            o = opening[0].open if opening[0].open is not None else opening[0].close
+            levels.update(orOpen=rnd(o), orClose=rnd(opening[-1].close))
     if post_b:
         hi, lo = _hi_lo(post_b)
         _, vol = _vwap(post_b)
